@@ -207,6 +207,63 @@ def _bill_url_house(congress: int, leg_type: str, leg_number: str) -> str:
 
 
 # =============================================================================
+# BILL TITLE LOOKUP — Congress.gov /bill endpoint
+# =============================================================================
+
+_bill_title_cache: dict[str, str] = {}
+
+_BILL_TYPE_MAP = {
+    "H.R.": "hr", "HR": "hr",
+    "H.Res.": "hres", "HRES": "hres",
+    "H.J.Res.": "hjres", "HJRES": "hjres",
+    "H.Con.Res.": "hconres", "HCONRES": "hconres",
+    "S.": "s", "S": "s",
+    "S.Res.": "sres", "SRES": "sres",
+    "S.J.Res.": "sjres", "SJRES": "sjres",
+    "S.Con.Res.": "sconres", "SCONRES": "sconres",
+}
+
+
+def _parse_bill_number(bill_number: str) -> tuple[str, str] | tuple[None, None]:
+    """Split 'H.R. 1234' or 'S.J.Res. 82' into (api_type, number)."""
+    if not bill_number:
+        return None, None
+    m = re.match(r'^([A-Za-z.]+)\s*(\d+)$', bill_number.strip())
+    if not m:
+        return None, None
+    raw_type, number = m.group(1), m.group(2)
+    api_type = _BILL_TYPE_MAP.get(raw_type)
+    if not api_type:
+        return None, None
+    return api_type, number
+
+
+def fetch_bill_title(bill_number: str, congress: int) -> str:
+    """Look up the official short title for a bill from Congress.gov. Returns '' on failure."""
+    if not bill_number or bill_number in _bill_title_cache:
+        return _bill_title_cache.get(bill_number, "")
+
+    api_type, number = _parse_bill_number(bill_number)
+    if not api_type:
+        _bill_title_cache[bill_number] = ""
+        return ""
+
+    url = f"{CONGRESS_GOV_BASE}/bill/{congress}/{api_type}/{number}"
+    data = _get_json(url, {"api_key": CONGRESS_GOV_API_KEY}, f"bill title {bill_number}")
+    title = ""
+    if data:
+        bill = data.get("bill", {})
+        title = (
+            bill.get("title")
+            or bill.get("shortTitle")
+            or (bill.get("titles") or [{}])[0].get("title", "")
+            or ""
+        )
+    _bill_title_cache[bill_number] = title
+    return title
+
+
+# =============================================================================
 # STEP 2 — House votes via Congress.gov API
 # =============================================================================
 
@@ -316,10 +373,12 @@ def fetch_house_votes(congress: int, session: int, earliest: datetime.date) -> t
 
             member_votes.extend(this_member_rows)
 
+            real_title = fetch_bill_title(bill_number, congress) if bill_number else ""
+
             summaries.append({
                 "vote_id":          vote_id,
                 "bill_number":      bill_number,
-                "bill_title":       raw_vote.get("voteQuestion", ""),
+                "bill_title":       real_title or raw_vote.get("voteQuestion", ""),
                 "chamber":          "house",
                 "date":             date_str,
                 "result":           raw_vote.get("result", ""),
@@ -465,10 +524,12 @@ def fetch_senate_votes(congress: int, session: int, earliest: datetime.date) -> 
 
         member_votes.extend(this_member_rows)
 
+        real_title = fetch_bill_title(issue, congress) if issue else ""
+
         summaries.append({
             "vote_id":          vote_id,
             "bill_number":      issue,
-            "bill_title":       question,
+            "bill_title":       real_title or question,
             "chamber":          "senate",
             "date":             date_str,
             "result":           result,
